@@ -1,0 +1,85 @@
+name: Build & release APK
+
+# Every push to main builds the app. When the GASLOG_KEY_PASSPHRASE secret is set, the APK is signed
+# with the Gas Log key and published as the latest release, so this link always installs the newest build:
+#   https://github.com/R0x7/GasLog/releases/latest/download/GasLog.apk
+# Without the secret it still builds an unsigned test APK (downloadable from the run's Artifacts).
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-release
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: android-actions/setup-android@v3
+
+      - uses: gradle/actions/setup-gradle@v5
+
+      - name: Unlock signing key
+        id: sign
+        env:
+          PASSPHRASE: ${{ secrets.GASLOG_KEY_PASSPHRASE }}
+        run: |
+          if [ -n "$PASSPHRASE" ]; then
+            openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 \
+              -in signing/release.jks.enc -out "$RUNNER_TEMP/release.jks" -pass env:PASSPHRASE
+            echo "signed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::GASLOG_KEY_PASSPHRASE secret isn't set yet, so this run builds an unsigned test APK and makes no release."
+            echo "signed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build signed release APK
+        if: steps.sign.outputs.signed == 'true'
+        env:
+          GASLOG_KEYSTORE: ${{ runner.temp }}/release.jks
+          GASLOG_KEY_PASSPHRASE: ${{ secrets.GASLOG_KEY_PASSPHRASE }}
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleRelease
+          cp app/build/outputs/apk/release/app-release.apk GasLog.apk
+
+      - name: Build test APK (no signing key yet)
+        if: steps.sign.outputs.signed != 'true'
+        run: |
+          chmod +x gradlew
+          ./gradlew --no-daemon --stacktrace assembleDebug
+          cp app/build/outputs/apk/debug/app-debug.apk GasLog-test.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GasLog-${{ github.run_number }}
+          path: GasLog*.apk
+
+      - name: Publish release
+        if: steps.sign.outputs.signed == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Gas Log 1.0.${{ github.run_number }}
+          files: GasLog.apk
+          make_latest: true
+          body: |
+            **Install on Android:** open this link on your phone →
+            https://github.com/${{ github.repository }}/releases/latest/download/GasLog.apk
+
+            Built from ${{ github.sha }}.
