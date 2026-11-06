@@ -20,7 +20,7 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import kotlin.math.abs
 
-enum class Src { NONE, PHOTO, CALC, NEARBY }
+enum class Src { NONE, PHOTO, LIVE, CALC, NEARBY }
 
 enum class Screen { LOG, STATS }
 
@@ -103,6 +103,13 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
     var locationAsked by mutableStateOf(prefs.locationAsked)
         private set
     var quickPhoto by mutableStateOf(false)
+        private set
+
+    /** The full-screen live camera scan is open. */
+    var liveScan by mutableStateOf(false)
+        private set
+    /** Whether the tile / widget / shortcut open the live scan (else the camera app). */
+    var quickLive by mutableStateOf(prefs.quickLive)
         private set
 
     /** Photos in any order; Gemini works out which is the pump and which the dash. */
@@ -247,7 +254,8 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         if (index in photos.indices) photos.removeAt(index)
     }
 
-    fun readPhotos() {
+    /** Reads the photos with Gemini. [onlyEmpty]: keep what's already filled in (after a live scan). */
+    fun readPhotos(onlyEmpty: Boolean = false) {
         val key = prefs.geminiKey
         if (key.isBlank()) {
             readStatus = "Add your Gemini API key first (Settings)."
@@ -261,7 +269,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
             readStatus = "Reading the numbers…"
             try {
                 val r = withContext(Dispatchers.IO) { GeminiClient.read(key, list) }
-                applyReading(r)
+                applyReading(r, onlyEmpty)
                 readStatus = if (r.notes.isNotBlank()) "⚠️ ${r.notes}" else "Done — check the numbers below."
             } catch (e: Exception) {
                 readStatus = if (Connectivity.isNetworkError(e)) {
@@ -273,21 +281,27 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun applyReading(r: Reading) {
-        r.ppg?.let { setNum(ppg, it, 3, Src.PHOTO) }
-        r.gallons?.let { setNum(gallons, it, 3, Src.PHOTO) }
-        r.cost?.let { setNum(cost, it, 2, Src.PHOTO) }
-        r.odo?.let { setNum(odo, it, 0, Src.PHOTO) }
-        r.tripA?.let { setNum(tripA, it, 1, Src.PHOTO) }
-        r.octane?.let { setNum(octane, it, 0, Src.PHOTO) }
+    private fun applyReading(r: Reading, onlyEmpty: Boolean = false) {
+        fun put(f: FieldState, value: Double?, decimals: Int) {
+            if (value != null && (!onlyEmpty || f.text.isBlank() || f.src == Src.CALC)) setNum(f, value, decimals, Src.PHOTO)
+        }
+        put(ppg, r.ppg, 3)
+        put(gallons, r.gallons, 3)
+        put(cost, r.cost, 2)
+        put(odo, r.odo, 0)
+        put(tripA, r.tripA, 1)
+        put(octane, r.octane, 0)
         // A remembered station near here beats the brand on the pump ("Valero Big Bear" vs "Valero").
-        if (r.station.isNotBlank() && place.src != Src.NEARBY) {
+        if (r.station.isNotBlank() && place.src != Src.NEARBY && (!onlyEmpty || place.text.isBlank())) {
             val match = config?.places?.firstOrNull { it.equals(r.station, ignoreCase = true) }
             place.text = match ?: r.station
             place.src = Src.PHOTO
         }
+        fillGaps()
+    }
 
-        // Fill gaps from what we know; these are marked "calc" so you can tell.
+    /** Fill gaps from what we know; these are marked "calc" so you can tell. */
+    private fun fillGaps() {
         val v = values()
         val last = previousOdo()
         if (v.tripA == null && v.odo != null && last != null && v.odo > last) setNum(tripA, v.odo - last, 1, Src.CALC)
@@ -297,6 +311,64 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         if (v.ppg == null && v.gallons != null && v.cost != null && v.gallons > 0) setNum(ppg, v.cost / v.gallons, 3, Src.CALC)
         if (v.octane == null) car?.lastOctane?.let { setNum(octane, it, 0, Src.CALC) }
         saveArmed = false
+    }
+
+    /* ───────────── live scan ───────────── */
+
+    fun openLiveScan() {
+        screen = Screen.LOG
+        if (saved != null) newEntry()
+        liveScan = true
+    }
+
+    fun closeLiveScan() {
+        liveScan = false
+    }
+
+    /** What the live scan needs to tell the numbers apart: last fill-up's odometer and price. */
+    fun liveHint(odoNow: Double?): LiveHint = LiveHint(
+        lastOdo = previousOdo(),
+        lastPpg = car?.fills?.lastOrNull { it.ppg != null }?.ppg,
+        odoNow = odoNow,
+    )
+
+    /**
+     * Puts the live-scanned numbers in the form. [snapshots] (frames grabbed while scanning) become photos,
+     * and if something is still missing, Gemini reads those frames to fill only the gaps.
+     */
+    fun applyLive(values: Map<LiveField, Double>, snapshots: List<android.graphics.Bitmap>) {
+        liveScan = false
+        for ((f, v) in values) setNum(fieldFor(f), v, f.decimals, Src.LIVE)
+        fillGaps()
+        val got = values.size
+        readStatus = if (got == 0) null else "Scanned $got number${if (got == 1) "" else "s"} live — check them below."
+        if (snapshots.isEmpty()) return
+        viewModelScope.launch {
+            val room = (MAX_PHOTOS - photos.size).coerceAtLeast(0)
+            val prepared = runCatching {
+                withContext(Dispatchers.Default) { snapshots.take(room).map { PhotoUtils.fromBitmap(it) } }
+            }.getOrDefault(emptyList())
+            photos += prepared
+            val v = values()
+            val missing = listOf(v.ppg, v.gallons, v.cost, v.odo, v.tripA).any { it == null }
+            if (missing && prepared.isNotEmpty() && prefs.geminiKey.isNotBlank() &&
+                Connectivity.isOnline(getApplication<Application>())
+            ) readPhotos(onlyEmpty = true)
+        }
+    }
+
+    private fun fieldFor(f: LiveField): FieldState = when (f) {
+        LiveField.PPG -> ppg
+        LiveField.GALLONS -> gallons
+        LiveField.COST -> cost
+        LiveField.OCTANE -> octane
+        LiveField.ODO -> odo
+        LiveField.TRIP_A -> tripA
+    }
+
+    fun changeQuickLive(on: Boolean) {
+        prefs.quickLive = on
+        quickLive = on
     }
 
     private fun setNum(f: FieldState, value: Double, decimals: Int, src: Src) {
@@ -658,7 +730,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
     fun requestQuickPhoto() {
         screen = Screen.LOG
         if (saved != null || editingRow != null) newEntry()
-        quickPhoto = true
+        if (quickLive) liveScan = true else quickPhoto = true
     }
 
     fun consumeQuickPhoto() {

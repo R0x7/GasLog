@@ -140,6 +140,7 @@ fun GasLogApp(vm: GasViewModel) {
             Spacer(Modifier.height(24.dp))
         }
         if (vm.showSettings) SettingsDialog(vm)
+        if (vm.liveScan) LiveScanScreen(vm)
     }
 }
 
@@ -348,6 +349,15 @@ private fun PhotoCard(vm: GasViewModel) {
     }
 
     Section("Photos") {
+        Button(
+            onClick = { vm.openLiveScan() },
+            modifier = Modifier.fillMaxWidth().height(52.dp),
+        ) { Text("📷  Live scan — just point the camera", fontWeight = FontWeight.Bold) }
+        Text(
+            "Or add photos and let Gemini read them:",
+            style = MaterialTheme.typography.bodySmall,
+            color = muted(),
+        )
         Text(
             "Snap the pump and the dash in any order — one dash photo is enough if it shows Trip A and the odometer.",
             style = MaterialTheme.typography.bodySmall,
@@ -505,12 +515,13 @@ private fun FormCard(vm: GasViewModel, cfg: LogConfig) {
 @Composable
 private fun FormField(vm: GasViewModel, f: FieldState, label: String, keyboard: KeyboardType, modifier: Modifier) {
     val accent = when (f.src) {
-        Src.PHOTO -> photoColor()
+        Src.PHOTO, Src.LIVE -> photoColor()
         Src.CALC, Src.NEARBY -> calcColor()
         Src.NONE -> null
     }
     val suffix = when (f.src) {
         Src.PHOTO -> " · photo"
+        Src.LIVE -> " · live"
         Src.CALC -> " · calc"
         Src.NEARBY -> " · nearby"
         Src.NONE -> ""
@@ -656,6 +667,20 @@ private fun SettingsDialog(vm: GasViewModel) {
                     )
                 }
                 TextButton(onClick = { vm.setIntervals(oil, tires) }) { Text("Save intervals") }
+
+                HorizontalDivider()
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Quick launch opens live scan", fontWeight = FontWeight.SemiBold)
+                        Text(
+                            if (vm.quickLive) "Tile, widget and shortcut open the live camera scan."
+                            else "Tile, widget and shortcut open the camera app for a photo.",
+                            color = muted(),
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    Switch(checked = vm.quickLive, onCheckedChange = { vm.changeQuickLive(it) })
+                }
 
                 HorizontalDivider()
                 Text("Remembered stations", fontWeight = FontWeight.SemiBold)

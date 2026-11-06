@@ -16,6 +16,8 @@ android {
         val build = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 1
         versionCode = build
         versionName = "1.0.$build"
+        // Phones only: the on-device text recognizer ships ~11 MB of native code per CPU type.
+        ndk { abiFilters += listOf("arm64-v8a", "armeabi-v7a") }
     }
 
     // Release signing comes from the CI workflow (the key is decrypted there; see signing/README.md).
@@ -63,4 +65,14 @@ dependencies {
 
     // Google authorization (Sheets access). Sheets and Gemini are called over plain HTTPS.
     implementation("com.google.android.gms:play-services-auth:22.0.0")
+
+    // Live scan: camera preview + on-device text recognition (works offline, nothing is uploaded).
+    val camerax = "1.6.2"
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax")
+    implementation("androidx.camera:camera-mlkit-vision:$camerax")
+    implementation("com.google.mlkit:text-recognition:16.0.1")
+
+    testImplementation("junit:junit:4.13.2")
 }

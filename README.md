@@ -12,6 +12,12 @@ and **their own** free Gemini key.
 ## What it does
 - **Log a fill-up from photos** — snap the pump and the dash in any order; Gemini reads the numbers, the app
   checks the pump math, the odometer and Trip A, then adds a row to the car's tab.
+- **Live scan** — skip the photos: open the camera, point it at the pump and then the dash, and the numbers
+  are read on the phone as you move (no upload, works offline). A number locks in once it has been read the
+  same way a few times; the pump math (price × gallons = total) and the odometer since your last fill-up are
+  used to tell the numbers apart. Tap a wrong one to read it again. If anything is still missing, Gemini
+  reads the frames it grabbed to fill just those gaps. The Quick Settings tile, widget and shortcut open it
+  directly (switchable in Settings).
 - **Partial fills** — turn off "Filled to full" and that tank's miles and gallons roll into the next full
   tank's mpg (stored as "partial fill" in the notes column).
 - **Stats** — usual mpg, cost per mile, monthly spending, an mpg-per-tank chart and a station price ranking.

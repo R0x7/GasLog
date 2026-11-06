@@ -52,4 +52,9 @@ class Prefs(context: Context) {
     var latestBuild: Int
         get() = p.getInt("latestBuild", 0)
         set(v) = p.edit().putInt("latestBuild", v).apply()
+
+    /** Quick launch (tile, widget, shortcut) opens the live scan instead of the camera app. */
+    var quickLive: Boolean
+        get() = p.getBoolean("quickLive", true)
+        set(v) = p.edit().putBoolean("quickLive", v).apply()
 }

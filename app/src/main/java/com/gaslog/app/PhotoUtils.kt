@@ -66,4 +66,17 @@ object PhotoUtils {
 
         return PreparedPhoto(Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP), thumb)
     }
+
+    /** A frame grabbed from the live camera preview, prepared like a photo. */
+    fun fromBitmap(src: Bitmap, maxEdge: Int = 1800): PreparedPhoto {
+        val s = maxEdge.toFloat() / max(src.width, src.height)
+        val bmp = if (s < 1f) Bitmap.createScaledBitmap(src, (src.width * s).roundToInt(), (src.height * s).roundToInt(), true) else src
+        val out = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        val t = 360f / max(bmp.width, bmp.height)
+        val thumb = if (t < 1f) {
+            Bitmap.createScaledBitmap(bmp, (bmp.width * t).roundToInt(), (bmp.height * t).roundToInt(), true)
+        } else bmp
+        return PreparedPhoto(Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP), thumb)
+    }
 }
