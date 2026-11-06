@@ -1,5 +1,7 @@
 package com.gaslog.app
 
+import java.time.LocalDate
+
 /** One tab in the spreadsheet. */
 data class Tab(
     val id: Int,
@@ -7,6 +9,36 @@ data class Tab(
     val rowCount: Int,
     val colCount: Int,
     val isGrid: Boolean,
+)
+
+/** One logged fill-up read back from a car tab. */
+data class Fill(
+    val row: Int,
+    val date: LocalDate?,
+    val odo: Double?,
+    val tripA: Double?,
+    val place: String,
+    val octane: Double?,
+    val ppg: Double?,
+    val gallons: Double?,
+    val cost: Double?,
+    val notes: String,
+) {
+    val partial: Boolean get() = Notes.isPartial(notes)
+}
+
+enum class Service(val title: String, val headerMatch: String, val header: String, val noteWord: String) {
+    OIL("Oil change", "oil change", "OIL CHANGES", "oil change"),
+    TIRES("Tire rotation", "tire rotation", "Tire Rotation", "tire rotation"),
+}
+
+/** Where a service is recorded in a tab, and the last mileage found there. */
+data class ServiceInfo(
+    val service: Service,
+    val col: Int,          // 1-based column of the header ("OIL CHANGES")
+    val mileageCol: Int?,  // the "Mileage" column right after it, if any
+    val lastMileage: Double?,
+    val lastUsedRow: Int,  // last row with anything in these columns (0 if none)
 )
 
 /** A tab that looks like a gas log (date | trip/odometer | trip a | ...). */
@@ -17,6 +49,8 @@ data class Car(
     val lastOdo: Double?,
     val lastDate: String,
     val lastOctane: Double?,
+    val fills: List<Fill> = emptyList(),
+    val services: Map<Service, ServiceInfo> = emptyMap(),
 )
 
 data class LogConfig(
@@ -55,10 +89,22 @@ data class SaveResult(
     val row: Int,
     val mpg: Double?,
     val perMile: Double?,
+    val queued: Boolean = false,
+    val edited: Boolean = false,
 )
 
-enum class Slot(val title: String, val icon: String, val label: String) {
-    PUMP("Pump", "⛽", "Pump display"),
-    TRIP("Trip A", "🅰️", "Dashboard showing Trip A"),
-    ODO("Odometer", "🧭", "Dashboard showing the odometer"),
+/** The notes column doubles as the partial-fill flag ("partial fill; anything else"). */
+object Notes {
+    private const val TAG = "partial fill"
+    fun isPartial(notes: String) = notes.contains("partial", ignoreCase = true)
+    fun compose(notes: String, partial: Boolean): String {
+        val rest = strip(notes)
+        return when {
+            partial && rest.isNotEmpty() -> "$TAG; $rest"
+            partial -> TAG
+            else -> rest
+        }
+    }
+    fun strip(notes: String): String =
+        notes.replace(Regex("(?i)partial( fill)?;?\\s*"), "").trim()
 }

@@ -59,6 +59,12 @@ open class SheetsClient(private val token: String) {
         return JSONObject(Http.request("POST", "$base/${Http.enc(id)}:batchUpdate", token, body = body.toString()))
     }
 
+    /** Clears values (not formatting) in the given ranges. */
+    open fun batchClear(id: String, ranges: List<String>) {
+        val body = JSONObject().put("ranges", JSONArray().apply { ranges.forEach { put(it) } })
+        Http.request("POST", "$base/${Http.enc(id)}/values:batchClear", token, body = body.toString())
+    }
+
     /** Creates a new spreadsheet in the user's Drive. Returns (spreadsheetId, first tab id). */
     open fun create(title: String, firstTab: String): Pair<String, Int> {
         val tabProps = JSONObject()

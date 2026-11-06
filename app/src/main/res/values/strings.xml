@@ -1,3 +1,8 @@
 <resources>
     <string name="app_name">Gas Log</string>
+    <string name="tile_label">Log gas</string>
+    <string name="widget_label">Log gas</string>
+    <string name="widget_description">Tap to photograph the pump and log a fill-up.</string>
+    <string name="shortcut_short">Log fill-up</string>
+    <string name="shortcut_long">Log a fill-up</string>
 </resources>

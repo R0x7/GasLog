@@ -2,11 +2,11 @@
 
 package com.gaslog.app.ui
 
+import android.Manifest
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -14,12 +14,10 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -34,8 +32,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -45,6 +41,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -68,14 +65,18 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.gaslog.app.Car
 import com.gaslog.app.FieldState
 import com.gaslog.app.GasViewModel
+import com.gaslog.app.LocationHelper
 import com.gaslog.app.LogConfig
 import com.gaslog.app.PhotoUtils
-import com.gaslog.app.PreparedPhoto
 import com.gaslog.app.SaveResult
-import com.gaslog.app.Slot
+import com.gaslog.app.Screen
+import com.gaslog.app.Service
 import com.gaslog.app.Src
+import com.gaslog.app.Updates
+import java.util.Locale
 
 private const val KEY_URL = "https://aistudio.google.com/apikey"
 
@@ -84,6 +85,9 @@ fun GasLogApp(vm: GasViewModel) {
     LaunchedEffect(vm.sheetId) {
         if (vm.sheetId != null && vm.config == null) vm.refresh()
     }
+    LaunchedEffect(Unit) { vm.locate() }
+    val uri = LocalUriHandler.current
+
     Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
         Column(
             Modifier
@@ -95,16 +99,43 @@ fun GasLogApp(vm: GasViewModel) {
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             Header(vm)
+            val cfg = vm.config
+            if (cfg != null && cfg.cars.isNotEmpty()) ScreenTabs(vm)
+
+            vm.update?.let { r ->
+                Banner(
+                    "Update available: ${r.name}.",
+                    warn = false,
+                    action = "Install",
+                    onAction = { uri.openUri(Updates.APK_URL) },
+                    secondAction = "Later",
+                    onSecond = { vm.dismissUpdate() },
+                )
+            }
+            if (vm.queuedCount > 0) {
+                Banner(
+                    if (vm.queuedCount == 1) "1 fill-up is saved on this phone, waiting for a connection."
+                    else "${vm.queuedCount} fill-ups are saved on this phone, waiting for a connection.",
+                    action = if (vm.flushing) "Sending…" else "Send now",
+                    onAction = { vm.flushQueue() },
+                )
+            }
             vm.message?.let { msg ->
-                MessageCard(msg, onRetry = if (vm.sheetId != null && vm.config == null) ({ vm.refresh() }) else null)
+                Banner(
+                    msg,
+                    action = if (vm.sheetId != null && vm.config == null) "Try again" else "OK",
+                    onAction = { vm.onMessageAction() },
+                )
             }
             if (!vm.hasKey) KeyCard(vm)
+
             when {
                 vm.sheetId == null -> SetupCard(vm)
-                vm.config == null -> {
+                cfg == null -> {
                     if (vm.loading) LoadingRow("Opening your sheet…")
                 }
-                else -> MainContent(vm)
+                vm.screen == Screen.STATS && cfg.cars.isNotEmpty() -> StatsScreen(vm, cfg)
+                else -> LogScreen(vm, cfg)
             }
             Spacer(Modifier.height(24.dp))
         }
@@ -112,7 +143,7 @@ fun GasLogApp(vm: GasViewModel) {
     }
 }
 
-/* ───────────── pieces ───────────── */
+/* ───────────── shell ───────────── */
 
 @Composable
 private fun Header(vm: GasViewModel) {
@@ -129,49 +160,14 @@ private fun Header(vm: GasViewModel) {
 }
 
 @Composable
-private fun Section(title: String?, content: @Composable ColumnScope.() -> Unit) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-    ) {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-            if (title != null) {
-                Text(
-                    title.uppercase(),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = muted(),
-                    letterSpacing = 1.sp,
-                )
-            }
-            content()
-        }
+private fun ScreenTabs(vm: GasViewModel) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Pill("Log", selected = vm.screen == Screen.LOG) { vm.screen = Screen.LOG }
+        Pill("Stats", selected = vm.screen == Screen.STATS) { vm.screen = Screen.STATS }
     }
 }
 
-@Composable
-private fun MessageCard(text: String, onRetry: (() -> Unit)?) {
-    Surface(
-        color = MaterialTheme.colorScheme.tertiaryContainer,
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(Modifier.padding(12.dp)) {
-            Text(text, color = MaterialTheme.colorScheme.onTertiaryContainer)
-            if (onRetry != null) TextButton(onClick = onRetry) { Text("Try again") }
-        }
-    }
-}
-
-@Composable
-private fun LoadingRow(text: String) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
-        CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-        Spacer(Modifier.width(10.dp))
-        Text(text, color = muted())
-    }
-}
+/* ───────────── setup ───────────── */
 
 @Composable
 private fun SetupCard(vm: GasViewModel) {
@@ -239,10 +235,12 @@ private fun KeyCard(vm: GasViewModel) {
     }
 }
 
+/* ───────────── log screen ───────────── */
+
 @Composable
-private fun MainContent(vm: GasViewModel) {
-    val cfg = vm.config ?: return
+private fun LogScreen(vm: GasViewModel, cfg: LogConfig) {
     CarCard(vm, cfg)
+    LocationPrompt(vm)
     val done = vm.saved
     if (done != null) {
         DoneCard(vm, done)
@@ -254,99 +252,172 @@ private fun MainContent(vm: GasViewModel) {
 
 @Composable
 private fun CarCard(vm: GasViewModel, cfg: LogConfig) {
-    var adding by remember { mutableStateOf(false) }
+    var logging by remember { mutableStateOf<Service?>(null) }
     val current = vm.car
     Section("Car") {
         if (cfg.cars.isEmpty()) Text("No car tabs yet.", color = muted())
-        FlowRow(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            cfg.cars.forEach { c ->
-                if (c.name == current?.name) {
-                    Button(onClick = {}) { Text(c.name) }
-                } else {
-                    OutlinedButton(onClick = { vm.selectCar(c.name) }) { Text(c.name) }
-                }
-            }
-            TextButton(onClick = { adding = true }, enabled = !vm.loading) { Text("+ Add car") }
-        }
+        CarPicker(vm, cfg.cars, showAdd = true)
         if (current != null) {
             val lastOdo = current.lastOdo
             Text(
                 if (lastOdo != null) {
-                    "Last fill-up ${current.lastDate} at ${GasViewModel.fmtInt(lastOdo)} mi · saves to row ${current.nextRow}"
+                    "Last fill-up ${current.lastDate} at ${GasViewModel.fmtInt(lastOdo)} mi · next row ${current.nextRow}"
                 } else {
                     "Saves to row ${current.nextRow}"
                 },
                 style = MaterialTheme.typography.bodySmall,
                 color = muted(),
             )
+            Service.entries.forEach { s ->
+                val st = vm.serviceStatus(current, s)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        (if (st.warn) "🔧 " else "") + st.text,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = if (st.warn) FontWeight.SemiBold else FontWeight.Normal,
+                        color = if (st.warn) MaterialTheme.colorScheme.onTertiaryContainer else MaterialTheme.colorScheme.onSurface,
+                        modifier = Modifier.weight(1f),
+                    )
+                    TextButton(onClick = { logging = s }, enabled = !vm.loading) { Text("Log") }
+                }
+            }
+            if (current.fills.isNotEmpty() && vm.editingRow == null) {
+                TextButton(onClick = { vm.startEditLast() }) { Text("Edit last fill-up") }
+            }
         }
     }
-    if (adding) {
-        NameDialog(
-            title = "Add a car",
-            confirm = "Add tab",
-            onDismiss = { adding = false },
-            onConfirm = { name -> adding = false; vm.addCar(name) },
+    val s = logging
+    if (s != null && current != null) {
+        TextDialog(
+            title = "Log ${s.title.lowercase()}",
+            label = "Odometer",
+            confirm = "Log it",
+            initial = current.lastOdo?.let { GasViewModel.trimNum(it) }.orEmpty(),
+            message = "Adds today's ${s.title.lowercase()} to the ${current.name} tab.",
+            numeric = true,
+            onDismiss = { logging = null },
+            onConfirm = { odo -> logging = null; vm.logService(s, odo) },
         )
     }
 }
 
 @Composable
+private fun LocationPrompt(vm: GasViewModel) {
+    val context = LocalContext.current
+    if (vm.locationAsked || LocationHelper.hasPermission(context) || vm.saved != null) return
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) { result ->
+        vm.onLocationAnswer(result.values.any { it })
+    }
+    Banner(
+        "Remember stations? Gas Log can fill in the place when you're back at a station you've used. Your location stays on this phone.",
+        warn = false,
+        action = "Allow",
+        onAction = {
+            launcher.launch(arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION))
+        },
+        secondAction = "No thanks",
+        onSecond = { vm.onLocationAnswer(false) },
+    )
+}
+
+@Composable
 private fun PhotoCard(vm: GasViewModel) {
     val context = LocalContext.current
-    var pendingSlot by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var menu by remember { mutableStateOf(false) }
 
     val camera = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-        val slot = pendingSlot?.let { Slot.valueOf(it) }
         val uri = pendingUri?.let { Uri.parse(it) }
-        if (ok && slot != null && uri != null) vm.addPhoto(slot, uri)
+        if (ok && uri != null) vm.addPhoto(uri)
     }
-    val gallery = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
-        val slot = pendingSlot?.let { Slot.valueOf(it) }
-        if (uri != null && slot != null) vm.addPhoto(slot, uri)
+    val gallery = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickMultipleVisualMedia(GasViewModel.MAX_PHOTOS),
+    ) { uris -> uris.take((GasViewModel.MAX_PHOTOS - vm.photos.size).coerceAtLeast(0)).forEach { vm.addPhoto(it) } }
+
+    fun takePhoto() {
+        val uri = PhotoUtils.newCaptureUri(context)
+        pendingUri = uri.toString()
+        camera.launch(uri)
+    }
+
+    LaunchedEffect(vm.quickPhoto) {
+        if (vm.quickPhoto) {
+            vm.consumeQuickPhoto()
+            takePhoto()
+        }
     }
 
     Section("Photos") {
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Slot.entries.forEach { slot ->
-                PhotoTile(
-                    slot = slot,
-                    photo = vm.photos[slot],
-                    modifier = Modifier.weight(1f),
-                    onCamera = {
-                        val uri = PhotoUtils.newCaptureUri(context)
-                        pendingSlot = slot.name
-                        pendingUri = uri.toString()
-                        camera.launch(uri)
-                    },
-                    onGallery = {
-                        pendingSlot = slot.name
-                        gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
-                    },
-                    onRemove = { vm.removePhoto(slot) },
-                )
-            }
-        }
         Text(
-            "One dash photo is enough if it shows both Trip A and the odometer.",
+            "Snap the pump and the dash in any order — one dash photo is enough if it shows Trip A and the odometer.",
             style = MaterialTheme.typography.bodySmall,
             color = muted(),
         )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            vm.photos.forEachIndexed { i, photo ->
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .height(110.dp)
+                        .clip(RoundedCornerShape(12.dp))
+                        .border(2.dp, MaterialTheme.colorScheme.primary, RoundedCornerShape(12.dp)),
+                ) {
+                    Image(
+                        bitmap = photo.thumb.asImageBitmap(),
+                        contentDescription = "Photo ${i + 1}",
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier.fillMaxSize(),
+                    )
+                    Box(
+                        Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(4.dp)
+                            .size(26.dp)
+                            .clip(RoundedCornerShape(50))
+                            .background(Color(0x99000000))
+                            .clickable { vm.removePhoto(i) },
+                        contentAlignment = Alignment.Center,
+                    ) { Text("×", color = Color.White, fontSize = 16.sp) }
+                }
+            }
+            if (vm.photos.size < GasViewModel.MAX_PHOTOS) {
+                Box(Modifier.weight(1f)) {
+                    Column(
+                        Modifier
+                            .fillMaxWidth()
+                            .height(110.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(MaterialTheme.colorScheme.surfaceVariant)
+                            .border(2.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(12.dp))
+                            .clickable { menu = true },
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center,
+                    ) {
+                        Text("📷", fontSize = 26.sp)
+                        Text(if (vm.photos.isEmpty()) "Add photo" else "Add", fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                    }
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Take photo") }, onClick = { menu = false; takePhoto() })
+                        DropdownMenuItem(
+                            text = { Text("Choose from gallery") },
+                            onClick = {
+                                menu = false
+                                gallery.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+                            },
+                        )
+                    }
+                }
+            }
+            // Keep tiles a sensible width when there are few photos.
+            repeat((GasViewModel.MAX_PHOTOS - 1 - vm.photos.size).coerceAtLeast(0)) { Spacer(Modifier.weight(1f)) }
+        }
         Button(
             onClick = { vm.readPhotos() },
             enabled = vm.photos.isNotEmpty() && !vm.reading,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) {
             if (vm.reading) {
-                CircularProgressIndicator(
-                    Modifier.size(18.dp),
-                    strokeWidth = 2.dp,
-                    color = MaterialTheme.colorScheme.onPrimary,
-                )
+                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
                 Spacer(Modifier.width(10.dp))
                 Text("Reading…")
             } else {
@@ -358,69 +429,16 @@ private fun PhotoCard(vm: GasViewModel) {
 }
 
 @Composable
-private fun PhotoTile(
-    slot: Slot,
-    photo: PreparedPhoto?,
-    modifier: Modifier,
-    onCamera: () -> Unit,
-    onGallery: () -> Unit,
-    onRemove: () -> Unit,
-) {
-    var menu by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(14.dp)
-    Box(modifier) {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .aspectRatio(3f / 4f)
-                .clip(shape)
-                .background(MaterialTheme.colorScheme.surfaceVariant)
-                .border(
-                    2.dp,
-                    if (photo != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outlineVariant,
-                    shape,
-                )
-                .clickable { menu = true },
-            contentAlignment = Alignment.Center,
-        ) {
-            if (photo != null) {
-                Image(
-                    bitmap = photo.thumb.asImageBitmap(),
-                    contentDescription = slot.title,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier.fillMaxSize(),
-                )
-                Text(
-                    slot.title,
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .padding(6.dp)
-                        .background(Color(0x99000000), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 6.dp, vertical = 2.dp),
-                )
-            } else {
-                Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(slot.icon, fontSize = 28.sp)
-                    Text(slot.title, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-                    Text("tap to add", fontSize = 11.sp, color = muted())
-                }
-            }
-        }
-        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-            DropdownMenuItem(text = { Text("Take photo") }, onClick = { menu = false; onCamera() })
-            DropdownMenuItem(text = { Text("Choose from gallery") }, onClick = { menu = false; onGallery() })
-            if (photo != null) {
-                DropdownMenuItem(text = { Text("Remove") }, onClick = { menu = false; onRemove() })
-            }
-        }
-    }
-}
-
-@Composable
 private fun FormCard(vm: GasViewModel, cfg: LogConfig) {
-    Section("Check & save") {
+    val editing = vm.editingRow
+    Section(if (editing != null) "Edit fill-up" else "Check & save") {
+        if (editing != null) {
+            Banner(
+                "Editing row $editing of ${vm.car?.name.orEmpty()}. Saving replaces that row.",
+                action = "Cancel edit",
+                onAction = { vm.cancelEdit() },
+            )
+        }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             FormField(vm, vm.date, "Date", KeyboardType.Text, Modifier.weight(1f))
             FormField(vm, vm.octane, "Octane", KeyboardType.Number, Modifier.weight(1f))
@@ -439,6 +457,19 @@ private fun FormCard(vm: GasViewModel, cfg: LogConfig) {
         }
         PlaceSuggestions(vm, cfg.places)
         FormField(vm, vm.notes, "Notes (optional)", KeyboardType.Text, Modifier.fillMaxWidth())
+
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Filled to full", fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (vm.partial) "Partial fill — mpg will be counted with your next full tank."
+                    else "Turn off if you didn't fill the tank all the way.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = muted(),
+                )
+            }
+            Switch(checked = !vm.partial, onCheckedChange = { vm.setPartialFill(!it) })
+        }
 
         vm.checks().forEach { c ->
             Surface(
@@ -460,7 +491,12 @@ private fun FormCard(vm: GasViewModel, cfg: LogConfig) {
             enabled = !vm.saving,
             modifier = Modifier.fillMaxWidth().height(52.dp),
         ) {
-            Text(if (vm.saveArmed) "Save anyway" else "Save to sheet", fontWeight = FontWeight.Bold)
+            val label = when {
+                vm.saveArmed -> "Save anyway"
+                editing != null -> "Save changes"
+                else -> "Save to sheet"
+            }
+            Text(label, fontWeight = FontWeight.Bold)
         }
         vm.saveStatus?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = muted()) }
     }
@@ -470,12 +506,13 @@ private fun FormCard(vm: GasViewModel, cfg: LogConfig) {
 private fun FormField(vm: GasViewModel, f: FieldState, label: String, keyboard: KeyboardType, modifier: Modifier) {
     val accent = when (f.src) {
         Src.PHOTO -> photoColor()
-        Src.CALC -> calcColor()
+        Src.CALC, Src.NEARBY -> calcColor()
         Src.NONE -> null
     }
     val suffix = when (f.src) {
         Src.PHOTO -> " · photo"
         Src.CALC -> " · calc"
+        Src.NEARBY -> " · nearby"
         Src.NONE -> ""
     }
     OutlinedTextField(
@@ -497,74 +534,101 @@ private fun FormField(vm: GasViewModel, f: FieldState, label: String, keyboard: 
 @Composable
 private fun PlaceSuggestions(vm: GasViewModel, places: List<String>) {
     val typed = vm.place.text.trim().lowercase()
-    if (places.any { it.lowercase() == typed && typed.isNotEmpty() }) return
+    if (typed.isNotEmpty() && places.any { it.lowercase() == typed }) return
     val matches = places.filter { typed.isEmpty() || it.lowercase().startsWith(typed) }.take(8)
     if (matches.isEmpty()) return
     FlowRow(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
-        matches.forEach { p ->
-            Surface(
-                shape = RoundedCornerShape(50),
-                color = MaterialTheme.colorScheme.surfaceVariant,
-                modifier = Modifier.clickable { vm.edit(vm.place, p) },
-            ) {
-                Text(p, style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp))
-            }
-        }
+        matches.forEach { p -> Pill(p) { vm.edit(vm.place, p) } }
     }
 }
 
 @Composable
 private fun DoneCard(vm: GasViewModel, s: SaveResult) {
+    val car: Car? = vm.config?.cars?.firstOrNull { it.name == s.car }
     Section(null) {
         Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
-            Text("✅", fontSize = 40.sp)
-            Text("Saved to ${s.car}, row ${s.row}.", textAlign = TextAlign.Center)
-            s.mpg?.let {
+            Text(if (s.queued) "📶" else "✅", fontSize = 40.sp)
+            Text(
+                when {
+                    s.queued -> "Saved on this phone. It goes to ${s.car} as soon as you're back online."
+                    s.edited -> "Updated ${s.car}, row ${s.row}."
+                    else -> "Saved to ${s.car}, row ${s.row}."
+                },
+                textAlign = TextAlign.Center,
+            )
+            val mpg = s.mpg
+            if (mpg != null) {
                 Text(
-                    String.format(java.util.Locale.US, "%.1f mpg", it),
+                    String.format(Locale.US, "%.1f mpg", mpg),
                     fontSize = 34.sp,
                     fontWeight = FontWeight.ExtraBold,
                     modifier = Modifier.padding(vertical = 6.dp),
                 )
+            } else if (vm.partial) {
+                Text(
+                    "Partial fill — this tank's mpg will show up with your next full fill-up.",
+                    color = muted(),
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(vertical = 6.dp),
+                )
             }
-            s.perMile?.let {
-                Text(String.format(java.util.Locale.US, "\$%.3f per mile", it), color = muted())
-            }
-            Spacer(Modifier.height(8.dp))
-            Text("Reset Trip A on the dash before you drive off.", fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-            Spacer(Modifier.height(12.dp))
-            Button(onClick = { vm.newEntry() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
-                Text("Log another fill-up", fontWeight = FontWeight.Bold)
-            }
+            s.perMile?.let { Text(String.format(Locale.US, "\$%.3f per mile", it), color = muted()) }
+        }
+        vm.doneAlert?.let { Banner("📉 $it") }
+        if (car != null) {
+            Service.entries.map { vm.serviceStatus(car, it) }.filter { it.warn }.forEach { Banner("🔧 ${it.text}") }
+        }
+        Text(
+            "Reset Trip A on the dash before you drive off.",
+            fontWeight = FontWeight.Bold,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Button(onClick = { vm.newEntry() }, modifier = Modifier.fillMaxWidth().height(52.dp)) {
+            Text("Log another fill-up", fontWeight = FontWeight.Bold)
+        }
+        if (!s.edited) {
+            OutlinedButton(
+                onClick = { vm.undoLast() },
+                enabled = !vm.saving,
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (s.queued) "Undo (remove from queue)" else "Undo — clear this row") }
         }
     }
 }
 
+/* ───────────── settings ───────────── */
+
 @Composable
 private fun SettingsDialog(vm: GasViewModel) {
     var key by remember { mutableStateOf("") }
+    var oil by remember { mutableStateOf(vm.oilInterval.toString()) }
+    var tires by remember { mutableStateOf(vm.tireInterval.toString()) }
     val uri = LocalUriHandler.current
     AlertDialog(
         onDismissRequest = { vm.showSettings = false },
         title = { Text("Settings") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                Text("Sheet: " + (vm.config?.title ?: if (vm.sheetId == null) "not connected" else "…"))
+            Column(
+                Modifier.verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text("Sheet: " + (vm.config?.title ?: if (vm.sheetId == null) "not connected" else "…"), fontWeight = FontWeight.SemiBold)
                 if (vm.sheetId != null) {
-                    OutlinedButton(
-                        onClick = { vm.disconnect(); vm.showSettings = false },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Use a different sheet") }
-                    OutlinedButton(
-                        onClick = { vm.refresh(); vm.showSettings = false },
-                        modifier = Modifier.fillMaxWidth(),
-                    ) { Text("Reload sheet") }
+                    OutlinedButton(onClick = { vm.refresh(); vm.showSettings = false }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Reload sheet")
+                    }
+                    OutlinedButton(onClick = { vm.disconnect(); vm.showSettings = false }, modifier = Modifier.fillMaxWidth()) {
+                        Text("Use a different sheet")
+                    }
                 }
+
                 HorizontalDivider()
-                Text(if (vm.hasKey) "Gemini key is saved on this phone." else "No Gemini key yet.")
+                Text("Gemini key", fontWeight = FontWeight.SemiBold)
+                Text(if (vm.hasKey) "Saved on this phone." else "No key yet.", color = muted())
                 OutlinedTextField(
                     value = key,
                     onValueChange = { key = it },
@@ -576,37 +640,37 @@ private fun SettingsDialog(vm: GasViewModel) {
                 Row {
                     TextButton(onClick = { uri.openUri(KEY_URL) }) { Text("Get a free key") }
                     Spacer(Modifier.weight(1f))
-                    TextButton(
-                        onClick = { vm.saveKey(key); key = "" },
-                        enabled = key.trim().length >= 20,
-                    ) { Text("Save key") }
+                    TextButton(onClick = { vm.saveKey(key); key = "" }, enabled = key.trim().length >= 20) { Text("Save key") }
                 }
+
+                HorizontalDivider()
+                Text("Maintenance reminders (miles between)", fontWeight = FontWeight.SemiBold)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = oil, onValueChange = { oil = it }, label = { Text("Oil") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f),
+                    )
+                    OutlinedTextField(
+                        value = tires, onValueChange = { tires = it }, label = { Text("Tires") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number), modifier = Modifier.weight(1f),
+                    )
+                }
+                TextButton(onClick = { vm.setIntervals(oil, tires) }) { Text("Save intervals") }
+
+                HorizontalDivider()
+                Text("Remembered stations", fontWeight = FontWeight.SemiBold)
+                Text(
+                    if (vm.stationCount == 0) "None yet. Stations are remembered when you save with location on."
+                    else "${vm.stationCount} on this phone.",
+                    color = muted(),
+                )
+                if (vm.stationCount > 0) TextButton(onClick = { vm.forgetStations() }) { Text("Forget them") }
+
+                HorizontalDivider()
+                Text("Version 1.0.${vm.installedVersion()}", fontWeight = FontWeight.SemiBold)
+                TextButton(onClick = { vm.checkForUpdate(force = true) }) { Text("Check for updates") }
             }
         },
         confirmButton = { TextButton(onClick = { vm.showSettings = false }) { Text("Done") } },
     )
 }
-
-@Composable
-private fun NameDialog(title: String, confirm: String, onDismiss: () -> Unit, onConfirm: (String) -> Unit) {
-    var name by remember { mutableStateOf("") }
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text(title) },
-        text = {
-            OutlinedTextField(
-                value = name,
-                onValueChange = { name = it },
-                label = { Text("Car name") },
-                singleLine = true,
-            )
-        },
-        confirmButton = {
-            TextButton(onClick = { onConfirm(name.trim()) }, enabled = name.isNotBlank()) { Text(confirm) }
-        },
-        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
-    )
-}
-
-@Composable
-private fun muted(): Color = MaterialTheme.colorScheme.onSurfaceVariant

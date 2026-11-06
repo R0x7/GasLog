@@ -1,9 +1,11 @@
 package com.gaslog.app
 
 import android.app.Application
+import android.net.ConnectivityManager
+import android.net.Network
 import android.net.Uri
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.lifecycle.AndroidViewModel
@@ -18,9 +20,11 @@ import java.time.temporal.ChronoUnit
 import java.util.Locale
 import kotlin.math.abs
 
-enum class Src { NONE, PHOTO, CALC }
+enum class Src { NONE, PHOTO, CALC, NEARBY }
 
-/** One form field: its text and where the value came from (photo / calculated / typed). */
+enum class Screen { LOG, STATS }
+
+/** One form field: its text and where the value came from (photo / calculated / nearby / typed). */
 class FieldState(initial: String = "") {
     var text by mutableStateOf(initial)
     var src by mutableStateOf(Src.NONE)
@@ -37,8 +41,13 @@ data class Values(
     val cost: Double?,
 )
 
+/** "Oil change due in 1,200 mi" for one service on one car. */
+data class ServiceStatus(val service: Service, val text: String, val warn: Boolean, val known: Boolean)
+
 class GasViewModel(app: Application) : AndroidViewModel(app) {
     private val prefs = Prefs(app)
+    private val stations = StationMemory(prefs)
+    private val queue = OfflineQueue(prefs)
 
     /** Set by MainActivity; asks Google for Sheets access. */
     var tokens: TokenSource? = null
@@ -51,6 +60,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var carName by mutableStateOf(prefs.lastCar)
         private set
+    var screen by mutableStateOf(Screen.LOG)
 
     var loading by mutableStateOf(false)
         private set
@@ -69,7 +79,34 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         private set
     var showSettings by mutableStateOf(false)
 
-    val photos = mutableStateMapOf<Slot, PreparedPhoto>()
+    /** MPG-drop warning for the entry just saved, shown on the done screen. */
+    var doneAlert by mutableStateOf<String?>(null)
+        private set
+
+    /** Row being edited ("Edit last fill-up"), or null for a new entry. */
+    var editingRow by mutableStateOf<Int?>(null)
+        private set
+    var partial by mutableStateOf(false)
+
+    var queuedCount by mutableStateOf(queue.all().size)
+        private set
+    var flushing by mutableStateOf(false)
+        private set
+    var update by mutableStateOf<Updates.Release?>(null)
+        private set
+    var oilInterval by mutableStateOf(prefs.oilInterval)
+        private set
+    var tireInterval by mutableStateOf(prefs.tireInterval)
+        private set
+    var stationCount by mutableStateOf(stations.count())
+        private set
+    var locationAsked by mutableStateOf(prefs.locationAsked)
+        private set
+    var quickPhoto by mutableStateOf(false)
+        private set
+
+    /** Photos in any order; Gemini works out which is the pump and which the dash. */
+    val photos = mutableStateListOf<PreparedPhoto>()
 
     val date = FieldState(today())
     val odo = FieldState()
@@ -82,9 +119,29 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
     val notes = FieldState()
     private val allFields get() = listOf(date, odo, tripA, place, octane, ppg, gallons, cost, notes)
 
+    private var here: android.location.Location? = null
+    private var lastSavedEntry: Entry? = null
+    private var lastQueuedId: Long? = null
+
     /** The selected car (falls back to the first one). */
     val car: Car?
         get() = config?.cars?.let { cars -> cars.firstOrNull { it.name == carName } ?: cars.firstOrNull() }
+
+    private val connectivity = app.getSystemService(ConnectivityManager::class.java)
+    private val netCallback = object : ConnectivityManager.NetworkCallback() {
+        override fun onAvailable(network: Network) {
+            viewModelScope.launch(Dispatchers.Main) { if (queuedCount > 0) flushQueue() }
+        }
+    }
+
+    init {
+        runCatching { connectivity?.registerDefaultNetworkCallback(netCallback) }
+        checkForUpdate(force = false)
+    }
+
+    override fun onCleared() {
+        runCatching { connectivity?.unregisterNetworkCallback(netCallback) }
+    }
 
     /* ───────────── sheet ───────────── */
 
@@ -93,6 +150,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         if (loading) return
         launchLoading {
             config = sheets { GasSheet.load(it, id) }
+            flushQueue()
         }
     }
 
@@ -144,6 +202,11 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** The button on the message banner: retry loading, or just dismiss. */
+    fun onMessageAction() {
+        if (sheetId != null && config == null) refresh() else message = null
+    }
+
     fun disconnect() {
         prefs.sheetId = null
         sheetId = null
@@ -164,11 +227,15 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
 
     /* ───────────── photos ───────────── */
 
-    fun addPhoto(slot: Slot, uri: Uri) {
+    fun addPhoto(uri: Uri) {
+        if (photos.size >= MAX_PHOTOS) {
+            readStatus = "Up to $MAX_PHOTOS photos — remove one first."
+            return
+        }
         viewModelScope.launch {
             readStatus = "Preparing photo…"
             try {
-                photos[slot] = withContext(Dispatchers.IO) { PhotoUtils.prepare(getApplication<Application>(), uri) }
+                photos += withContext(Dispatchers.IO) { PhotoUtils.prepare(getApplication<Application>(), uri) }
                 readStatus = null
             } catch (e: Exception) {
                 readStatus = "Couldn't open that photo."
@@ -176,8 +243,8 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun removePhoto(slot: Slot) {
-        photos.remove(slot)
+    fun removePhoto(index: Int) {
+        if (index in photos.indices) photos.removeAt(index)
     }
 
     fun readPhotos() {
@@ -187,7 +254,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
             showSettings = true
             return
         }
-        val list = Slot.entries.mapNotNull { s -> photos[s]?.let { s.label to it.base64 } }
+        val list = photos.map { it.base64 }
         if (list.isEmpty() || reading) return
         viewModelScope.launch {
             reading = true
@@ -197,7 +264,9 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
                 applyReading(r)
                 readStatus = if (r.notes.isNotBlank()) "⚠️ ${r.notes}" else "Done — check the numbers below."
             } catch (e: Exception) {
-                readStatus = friendly(e)
+                readStatus = if (Connectivity.isNetworkError(e)) {
+                    "No connection, so the photos can't be read right now. Type the numbers in — the fill-up will be sent when you're back online."
+                } else friendly(e)
             } finally {
                 reading = false
             }
@@ -211,7 +280,8 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         r.odo?.let { setNum(odo, it, 0, Src.PHOTO) }
         r.tripA?.let { setNum(tripA, it, 1, Src.PHOTO) }
         r.octane?.let { setNum(octane, it, 0, Src.PHOTO) }
-        if (r.station.isNotBlank()) {
+        // A remembered station near here beats the brand on the pump ("Valero Big Bear" vs "Valero").
+        if (r.station.isNotBlank() && place.src != Src.NEARBY) {
             val match = config?.places?.firstOrNull { it.equals(r.station, ignoreCase = true) }
             place.text = match ?: r.station
             place.src = Src.PHOTO
@@ -219,7 +289,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
 
         // Fill gaps from what we know; these are marked "calc" so you can tell.
         val v = values()
-        val last = car?.lastOdo
+        val last = previousOdo()
         if (v.tripA == null && v.odo != null && last != null && v.odo > last) setNum(tripA, v.odo - last, 1, Src.CALC)
         if (v.odo == null && v.tripA != null && last != null) setNum(odo, last + v.tripA, 0, Src.CALC)
         if (v.cost == null && v.ppg != null && v.gallons != null) setNum(cost, v.ppg * v.gallons, 2, Src.CALC)
@@ -234,6 +304,49 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         f.src = src
     }
 
+    /** Odometer of the fill-up before this one (for an edit, the one before the edited row). */
+    private fun previousOdo(): Double? {
+        val c = car ?: return null
+        val row = editingRow ?: return c.lastOdo
+        return c.fills.lastOrNull { it.row < row && it.odo != null }?.odo
+    }
+
+    /* ───────────── location ───────────── */
+
+    fun onLocationAnswer(granted: Boolean) {
+        prefs.locationAsked = true
+        locationAsked = true
+        if (granted) locate()
+    }
+
+    /** Gets the phone's position and pre-fills a remembered station if we're at one. */
+    fun locate() {
+        val ctx = getApplication<Application>()
+        if (!LocationHelper.hasPermission(ctx)) return
+        viewModelScope.launch {
+            val loc = runCatching { LocationHelper.current(ctx) }.getOrNull() ?: return@launch
+            here = loc
+            if (loc.hasAccuracy() && loc.accuracy > 250f) return@launch
+            val spot = stations.nearest(loc.latitude, loc.longitude) ?: return@launch
+            if (editingRow == null && (place.text.isBlank() || place.src == Src.PHOTO)) {
+                place.text = spot.place
+                place.src = Src.NEARBY
+            }
+        }
+    }
+
+    fun forgetStations() {
+        stations.clear()
+        stationCount = 0
+    }
+
+    private fun rememberStation(placeName: String) {
+        val loc = here ?: return
+        if (loc.hasAccuracy() && loc.accuracy > 250f) return
+        stations.remember(loc.latitude, loc.longitude, placeName)
+        stationCount = stations.count()
+    }
+
     /* ───────────── form ───────────── */
 
     fun edit(f: FieldState, text: String) {
@@ -241,6 +354,11 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         f.src = Src.NONE
         saveArmed = false
         saveStatus = null
+    }
+
+    fun setPartialFill(value: Boolean) {
+        partial = value
+        saveArmed = false
     }
 
     fun values() = Values(
@@ -251,6 +369,9 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         gallons = GasSheet.num(gallons.text),
         cost = GasSheet.num(cost.text),
     )
+
+    /** Usual mpg for the selected car: miles ÷ gallons over its last 10 full tanks. */
+    fun usualMpg(): Double? = car?.let { Stats.recentMpg(Stats.tanks(it.fills.filter { f -> f.row != editingRow })) }
 
     /** Sanity checks shown above the Save button. */
     fun checks(): List<Check> {
@@ -265,19 +386,22 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
                 Check(false, "Pump math checks out.")
             }
         }
-        val lastOdo = car?.lastOdo
+        val lastOdo = previousOdo()
         if (lastOdo != null && v.odo != null) {
             val driven = v.odo - lastOdo
             if (driven <= 0) {
-                out += Check(true, "Odometer isn't higher than the last entry (${fmtInt(lastOdo)}).")
+                out += Check(true, "Odometer isn't higher than the fill-up before (${fmtInt(lastOdo)}).")
             } else if (v.tripA != null && abs(v.tripA - driven) > 3) {
                 out += Check(true, "Trip A (${v.tripA}) doesn't match the odometer change (${fmtInt(driven)} mi since last fill). Wrong digit, or Trip A wasn't reset?")
             }
         }
-        if (v.tripA != null && v.gallons != null && v.gallons > 0) {
+        if (partial) {
+            out += Check(false, "Partial fill — its miles and gallons count toward your next full tank's mpg.")
+        } else if (v.tripA != null && v.gallons != null && v.gallons > 0) {
             val mpg = v.tripA / v.gallons
             val off = mpg < 10 || mpg > 60
             out += Check(off, "≈ ${String.format(Locale.US, "%.1f", mpg)} mpg" + if (off) " — looks off" else "")
+            if (!off) Stats.mpgDrop(mpg, usualMpg())?.let { out += Check(true, it) }
         }
         val missing = buildList {
             if (v.odo == null) add("odometer")
@@ -311,19 +435,35 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         val entry = Entry(
             dateSerial = ChronoUnit.DAYS.between(LocalDate.of(1899, 12, 30), day).toDouble(),
             odo = v.odo, tripA = v.tripA, place = place.text.trim(), octane = v.octane,
-            ppg = v.ppg, gallons = v.gallons, cost = v.cost, notes = notes.text.trim(),
+            ppg = v.ppg, gallons = v.gallons, cost = v.cost, notes = Notes.compose(notes.text, partial),
         )
+        val fullMpg = if (!partial && v.tripA != null && v.gallons != null && v.gallons > 0) v.tripA / v.gallons else null
+        val editRow = editingRow
+        val ctx = getApplication<Application>()
+        doneAlert = fullMpg?.let { Stats.mpgDrop(it, usualMpg()) }
+
+        if (editRow == null && !Connectivity.isOnline(ctx)) {
+            enqueue(id, c, entry, fullMpg)
+            return
+        }
         viewModelScope.launch {
             saving = true
             saveStatus = "Saving…"
             try {
-                val res = sheets { GasSheet.save(it, id, c, entry) }
-                val fallbackMpg = if (v.tripA != null && v.gallons != null && v.gallons > 0) v.tripA / v.gallons else null
-                saved = res.copy(mpg = res.mpg ?: fallbackMpg)
+                val res = sheets { GasSheet.save(it, id, c, entry, editRow) }
+                lastSavedEntry = entry
+                lastQueuedId = null
+                saved = res.copy(mpg = if (partial) null else (res.mpg ?: fullMpg))
                 prefs.lastCar = res.car
+                if (entry.place.isNotBlank()) rememberStation(entry.place)
                 saveStatus = null
+                reloadQuietly()
             } catch (e: Exception) {
-                saveStatus = "Not saved: " + friendly(e)
+                if (editRow == null && Connectivity.isNetworkError(e)) {
+                    enqueue(id, c, entry, fullMpg)
+                } else {
+                    saveStatus = "Not saved: " + friendly(e)
+                }
             } finally {
                 saving = false
                 saveArmed = false
@@ -331,15 +471,198 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun enqueue(sheet: String, c: Car, entry: Entry, mpg: Double?) {
+        val p = Pending(System.currentTimeMillis(), sheet, c.name, c.tabId, entry)
+        queue.add(p)
+        queuedCount = queue.all().size
+        lastQueuedId = p.id
+        lastSavedEntry = entry
+        if (entry.place.isNotBlank()) rememberStation(entry.place)
+        saved = SaveResult(c.name, 0, mpg, null, queued = true)
+        saveStatus = null
+        saveArmed = false
+    }
+
+    /** Sends fill-ups saved while offline. Stops at the first connection problem. */
+    fun flushQueue() {
+        if (flushing || tokens == null) return
+        val items = queue.all()
+        if (items.isEmpty()) return
+        if (!Connectivity.isOnline(getApplication<Application>())) return
+        viewModelScope.launch {
+            flushing = true
+            var sent = 0
+            try {
+                for (p in items) {
+                    val target = Car(p.carName, p.tabId, 0, null, "", null)
+                    sheets { GasSheet.save(it, p.sheetId, target, p.entry) }
+                    queue.remove(p.id)
+                    if (lastQueuedId == p.id) lastQueuedId = null
+                    sent++
+                }
+            } catch (e: Exception) {
+                if (!Connectivity.isNetworkError(e)) message = "Couldn't send a saved fill-up: " + friendly(e)
+            } finally {
+                queuedCount = queue.all().size
+                flushing = false
+            }
+            if (sent > 0) {
+                message = if (sent == 1) "Sent the fill-up you saved offline." else "Sent $sent fill-ups you saved offline."
+                reloadQuietly()
+            }
+        }
+    }
+
+    /** Undo the entry just saved: clears its row (or drops it from the offline queue). Values stay in the form. */
+    fun undoLast() {
+        val res = saved ?: return
+        val entry = lastSavedEntry ?: return
+        if (res.queued) {
+            lastQueuedId?.let { queue.remove(it) }
+            queuedCount = queue.all().size
+            saved = null
+            saveStatus = "Removed from the offline queue. Fix anything and save again."
+            return
+        }
+        val id = sheetId ?: return
+        val c = config?.cars?.firstOrNull { it.name == res.car } ?: car ?: return
+        viewModelScope.launch {
+            saving = true
+            try {
+                sheets { GasSheet.clearRow(it, id, c, res.row, entry.odo) }
+                saved = null
+                saveStatus = "Row ${res.row} cleared. Fix anything and save again."
+                reloadQuietly()
+            } catch (e: Exception) {
+                message = "Couldn't undo: " + friendly(e)
+            } finally {
+                saving = false
+            }
+        }
+    }
+
+    /** Loads the newest fill-up of the selected car into the form for editing. */
+    fun startEditLast() {
+        val c = car ?: return
+        val f = c.fills.lastOrNull() ?: run {
+            message = "No fill-ups on ${c.name} yet."
+            return
+        }
+        clearForm()
+        editingRow = f.row
+        date.text = f.date?.let { "${it.monthValue}/${it.dayOfMonth}/${it.year}" } ?: today()
+        f.odo?.let { setNum(odo, it, 0, Src.NONE) }
+        f.tripA?.let { tripA.text = trimNum(it) }
+        place.text = f.place
+        f.octane?.let { setNum(octane, it, 0, Src.NONE) }
+        f.ppg?.let { ppg.text = trimNum(it) }
+        f.gallons?.let { gallons.text = trimNum(it) }
+        f.cost?.let { setNum(cost, it, 2, Src.NONE) }
+        partial = f.partial
+        notes.text = Notes.strip(f.notes)
+        saved = null
+        screen = Screen.LOG
+    }
+
+    fun cancelEdit() {
+        clearForm()
+        date.text = today()
+        locate()
+    }
+
     fun newEntry() {
-        photos.clear()
-        allFields.forEach { it.text = ""; it.src = Src.NONE }
+        clearForm()
         date.text = today()
         saved = null
+        refresh()
+        locate()
+    }
+
+    private fun clearForm() {
+        photos.clear()
+        allFields.forEach { it.text = ""; it.src = Src.NONE }
+        partial = false
+        editingRow = null
         readStatus = null
         saveStatus = null
         saveArmed = false
-        refresh()
+    }
+
+    /* ───────────── maintenance ───────────── */
+
+    fun serviceStatus(c: Car, s: Service): ServiceStatus {
+        val info = c.services[s]
+        val last = info?.lastMileage
+        val odoNow = c.lastOdo
+        val interval = if (s == Service.OIL) oilInterval else tireInterval
+        if (last == null || odoNow == null) {
+            return ServiceStatus(s, "${s.title}: none logged yet", false, false)
+        }
+        val left = last + interval - odoNow
+        return when {
+            left < 0 -> ServiceStatus(s, "${s.title} overdue by ${fmtInt(-left)} mi", true, true)
+            left <= 500 -> ServiceStatus(s, "${s.title} due in ${fmtInt(left)} mi", true, true)
+            else -> ServiceStatus(s, "${s.title} in ${fmtInt(left)} mi (last at ${fmtInt(last)})", false, true)
+        }
+    }
+
+    fun logService(s: Service, odoText: String) {
+        val id = sheetId ?: return
+        val c = car ?: return
+        val mileage = GasSheet.num(odoText)
+        if (mileage == null) {
+            message = "Enter the odometer reading for the ${s.title.lowercase()}."
+            return
+        }
+        val stamp = LocalDate.now().let { "${it.monthValue}/${it.dayOfMonth}/${it.year % 100}" }
+        launchLoading {
+            config = sheets { sc ->
+                GasSheet.logService(sc, id, c, s, mileage, stamp)
+                GasSheet.load(sc, id)
+            }
+            message = "${s.title} logged on ${c.name} at ${fmtInt(mileage)} mi."
+        }
+    }
+
+    fun setIntervals(oil: String, tires: String) {
+        GasSheet.num(oil)?.toInt()?.takeIf { it in 500..50_000 }?.let { prefs.oilInterval = it; oilInterval = it }
+        GasSheet.num(tires)?.toInt()?.takeIf { it in 500..50_000 }?.let { prefs.tireInterval = it; tireInterval = it }
+    }
+
+    /* ───────────── updates & quick launch ───────────── */
+
+    fun installedVersion(): Int = installedBuild(getApplication())
+
+    fun checkForUpdate(force: Boolean) {
+        val installed = installedVersion()
+        if (prefs.latestBuild > installed) update = Updates.Release(prefs.latestBuild, "Gas Log 1.0.${prefs.latestBuild}")
+        if (!force && System.currentTimeMillis() - prefs.lastUpdateCheck < 6 * 3_600_000L) return
+        viewModelScope.launch {
+            val r = runCatching { withContext(Dispatchers.IO) { Updates.latest() } }.getOrNull()
+            if (r == null) {
+                if (force) message = "Couldn't check for updates right now."
+                return@launch
+            }
+            prefs.lastUpdateCheck = System.currentTimeMillis()
+            prefs.latestBuild = r.build
+            update = if (r.build > installed) r else null
+            if (force && update == null) message = "You're on the latest version (1.0.$installed)."
+        }
+    }
+
+    fun dismissUpdate() {
+        update = null
+    }
+
+    /** From the Quick Settings tile / widget / shortcut: go to a fresh entry and open the camera. */
+    fun requestQuickPhoto() {
+        screen = Screen.LOG
+        if (saved != null || editingRow != null) newEntry()
+        quickPhoto = true
+    }
+
+    fun consumeQuickPhoto() {
+        quickPhoto = false
     }
 
     /* ───────────── helpers ───────────── */
@@ -355,6 +678,14 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
             } finally {
                 loading = false
             }
+        }
+    }
+
+    /** Reloads the sheet without the spinner/message churn (after a save). */
+    private fun reloadQuietly() {
+        val id = sheetId ?: return
+        viewModelScope.launch {
+            runCatching { config = sheets { GasSheet.load(it, id) } }
         }
     }
 
@@ -383,6 +714,8 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     companion object {
+        const val MAX_PHOTOS = 4
+
         fun parseSheetId(link: String): String? {
             val t = link.trim()
             Regex("/spreadsheets/d/([a-zA-Z0-9_-]+)").find(t)?.let { return it.groupValues[1] }
@@ -400,6 +733,10 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
 
         fun fmtInt(d: Double): String = String.format(Locale.US, "%,d", Math.round(d))
 
-        private fun money(d: Double): String = String.format(Locale.US, "%.2f", d)
+        fun money(d: Double): String = String.format(Locale.US, "%.2f", d)
+
+        /** 192.6 → "192.6", 8.0 → "8", 5.879 → "5.879". */
+        fun trimNum(d: Double): String =
+            if (d == Math.rint(d)) d.toLong().toString() else d.toBigDecimal().stripTrailingZeros().toPlainString()
     }
 }

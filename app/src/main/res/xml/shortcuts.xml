@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press the app icon → "Log fill-up". -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutId="log"
+        android:shortcutLongLabel="@string/shortcut_long"
+        android:shortcutShortLabel="@string/shortcut_short">
+        <intent
+            android:action="com.gaslog.app.QUICK_LOG"
+            android:targetClass="com.gaslog.app.MainActivity"
+            android:targetPackage="com.gaslog.app" />
+    </shortcut>
+</shortcuts>

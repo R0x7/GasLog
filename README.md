@@ -9,6 +9,23 @@ and **their own** free Gemini key.
 
 ---
 
+## What it does
+- **Log a fill-up from photos** — snap the pump and the dash in any order; Gemini reads the numbers, the app
+  checks the pump math, the odometer and Trip A, then adds a row to the car's tab.
+- **Partial fills** — turn off "Filled to full" and that tank's miles and gallons roll into the next full
+  tank's mpg (stored as "partial fill" in the notes column).
+- **Stats** — usual mpg, cost per mile, monthly spending, an mpg-per-tank chart and a station price ranking.
+- **MPG drop alert** — warns when a tank comes in 15%+ below your usual mpg.
+- **Maintenance reminders** — reads the OIL CHANGES / Tire Rotation columns, shows when each is due
+  (intervals in Settings) and logs new ones.
+- **Remembers stations** — with location allowed, the place is filled in when you're back at a station
+  you've used (kept on the phone only).
+- **Works offline** — fill-ups saved without signal are queued and sent when you're back online.
+- **Edit or undo** — undo the entry you just saved, or edit the last fill-up.
+- **Quick launch** — a Quick Settings tile, a home-screen widget and a long-press shortcut all open straight
+  to the camera.
+- **Update notice** — checks this repo's releases and offers the new APK.
+
 ## Install
 
 **[Download Gas Log for Android](https://github.com/R0x7/GasLog/releases/latest/download/GasLog.apk)**

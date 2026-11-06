@@ -12,12 +12,12 @@ object GeminiClient {
     private val MODELS = listOf("gemini-flash-latest", "gemini-flash-lite-latest")
     private val TRY_NEXT_ON = setOf(403, 404, 429, 500, 503)
 
-    /** photos: (label, base64 JPEG). Blocking; call off the main thread. */
-    fun read(apiKey: String, photos: List<Pair<String, String>>): Reading {
+    /** photos: base64 JPEGs in any order (pump, dash, ...). Blocking; call off the main thread. */
+    fun read(apiKey: String, photos: List<String>): Reading {
         if (photos.isEmpty()) throw IOException("Add at least one photo.")
         val parts = JSONArray().put(JSONObject().put("text", PROMPT))
-        for ((label, data) in photos) {
-            parts.put(JSONObject().put("text", "Photo the user labeled \"$label\":"))
+        photos.forEachIndexed { i, data ->
+            parts.put(JSONObject().put("text", "Photo ${i + 1} of ${photos.size}:"))
             parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", data)))
         }
         val body = JSONObject()
@@ -91,7 +91,8 @@ object GeminiClient {
           show the station brand and the selected grade / octane (87, 89, 91 ...).
         - A car instrument cluster: the odometer (total miles, often "ODO") and Trip A
           (labeled "TRIP A" or "A", usually with one decimal).
-        A photo may show more than its label says; use everything visible.
+        The photos come in any order. Work out for yourself which shows the pump and which the dashboard;
+        one photo may show both, and several photos may show the same thing. Use everything visible.
 
         Pump displays often use seven-segment digits: check each digit carefully (8 vs 6 vs 9 vs 0,
         1 vs 7, 5 vs 6). Do not confuse the price per gallon with the total sale. Do not report
