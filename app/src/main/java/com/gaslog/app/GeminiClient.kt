@@ -20,21 +20,33 @@ object GeminiClient {
             parts.put(JSONObject().put("text", "Photo ${i + 1} of ${photos.size}:"))
             parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", data)))
         }
-        val body = JSONObject()
-            .put("contents", JSONArray().put(JSONObject().put("role", "user").put("parts", parts)))
-            .put("generationConfig", JSONObject().put("responseMimeType", "application/json"))
-            .toString()
+        val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", parts))
+        // Flash models "think" before answering by default, which is most of the wait and isn't needed
+        // to copy numbers off a display. Ask for no thinking; fall back if a model won't accept that.
+        fun body(noThinking: Boolean): String {
+            val gen = JSONObject().put("responseMimeType", "application/json")
+            if (noThinking) gen.put("thinkingConfig", JSONObject().put("thinkingBudget", 0))
+            return JSONObject().put("contents", contents).put("generationConfig", gen).toString()
+        }
+        fun call(model: String, noThinking: Boolean): Reading = parse(
+            Http.request(
+                "POST", "$BASE$model:generateContent",
+                headers = mapOf("x-goog-api-key" to apiKey),
+                body = body(noThinking),
+                readTimeoutMs = 120_000,
+            )
+        )
 
         var lastError = ""
         for (model in MODELS) {
             try {
-                val text = Http.request(
-                    "POST", "$BASE$model:generateContent",
-                    headers = mapOf("x-goog-api-key" to apiKey),
-                    body = body,
-                    readTimeoutMs = 120_000,
-                )
-                return parse(text)
+                return try {
+                    call(model, noThinking = true)
+                } catch (e: ApiException) {
+                    val aboutThinking = e.code == 400 && e.message.orEmpty().contains("think", ignoreCase = true)
+                    if (!aboutThinking) throw e
+                    call(model, noThinking = false)
+                }
             } catch (e: ApiException) {
                 val msg = e.message.orEmpty()
                 if (msg.contains("API key not valid", ignoreCase = true) || msg.contains("API_KEY_INVALID")) {

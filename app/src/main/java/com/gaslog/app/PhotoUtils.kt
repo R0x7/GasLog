@@ -27,7 +27,7 @@ object PhotoUtils {
     }
 
     /** Shrinks to [maxEdge] px on the long side, fixes rotation, and JPEG-encodes for Gemini. Blocking. */
-    fun prepare(context: Context, uri: Uri, maxEdge: Int = 1800): PreparedPhoto {
+    fun prepare(context: Context, uri: Uri, maxEdge: Int = 1536): PreparedPhoto {
         val resolver = context.contentResolver
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
@@ -57,7 +57,7 @@ object PhotoUtils {
         }
 
         val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
 
         val t = 360f / max(bmp.width, bmp.height)
         val thumb = if (t < 1f) {
@@ -68,11 +68,11 @@ object PhotoUtils {
     }
 
     /** A frame grabbed from the live camera preview, prepared like a photo. */
-    fun fromBitmap(src: Bitmap, maxEdge: Int = 1800): PreparedPhoto {
+    fun fromBitmap(src: Bitmap, maxEdge: Int = 1536): PreparedPhoto {
         val s = maxEdge.toFloat() / max(src.width, src.height)
         val bmp = if (s < 1f) Bitmap.createScaledBitmap(src, (src.width * s).roundToInt(), (src.height * s).roundToInt(), true) else src
         val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 85, out)
+        bmp.compress(Bitmap.CompressFormat.JPEG, 80, out)
         val t = 360f / max(bmp.width, bmp.height)
         val thumb = if (t < 1f) {
             Bitmap.createScaledBitmap(bmp, (bmp.width * t).roundToInt(), (bmp.height * t).roundToInt(), true)
