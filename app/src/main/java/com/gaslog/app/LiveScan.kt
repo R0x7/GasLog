@@ -47,15 +47,25 @@ internal data class NumToken(
     val dollar: Boolean,
     val label: Label?,
     val line: OcrLine,
+    val leadingZero: Boolean = false,
 )
 
 object LiveReader {
     // 123,456 · 5.879 · 8,021 (decimal comma) · $45.20 · 192.6
     private val NUMBER = Regex("(\\$\\s?)?(\\d{1,3}(?:,\\d{3})+|\\d+)(?:[.,](\\d{1,3}))?(?!\\d)")
     private val LOOKALIKE = mapOf('O' to '0', 'o' to '0', 'D' to '0', 'I' to '1', 'l' to '1', '|' to '1', 'S' to '5', 'B' to '8', 'Z' to '2')
+    private const val LOOK = "ODIlSBZo|"
+    // A run of digits and look-alike letters, not starting mid-word (so "mile" or "ODO" stay as they are).
+    private val DIGITISH = Regex("(?<![A-Za-z])[0-9$LOOK.,$]+")
+    private val SPACED = Regex("(?<!\\S)[0-9$LOOK](?: [0-9$LOOK]){2,}(?!\\S)")
+    // "106 7" → 106.7 (a lone last digit is the tenths); "1 2" or "20 4" style pairs elsewhere are left alone.
+    private val TENTHS = Regex("(?<![\\d.,])(\\d{2,4}) (\\d)(?![\\d.,])")
+    private val DISTANCES = setOf(Label.ODO, Label.TRIP_A, Label.IGNORE)
+    private val SHORT_NUMBER = Regex("\\d{1,4}")
+    private val ONE_DIGIT = Regex("\\d")
 
     fun analyze(lines: List<OcrLine>, hint: LiveHint): List<Pick> {
-        val tokens = tokens(lines)
+        val tokens = tokens(mergeTenths(lines))
         val out = mutableListOf<Pick>()
         out += pump(tokens, hint)
         octane(tokens)?.let { out += it }
@@ -65,13 +75,39 @@ object LiveReader {
         return out
     }
 
+    /**
+     * A lone digit right after a short number on the same row is the tenths: a trip meter's last drum (often
+     * white or red, read as its own line) or a seven-segment display whose decimal point wasn't seen.
+     */
+    internal fun mergeTenths(lines: List<OcrLine>): List<OcrLine> {
+        val used = mutableSetOf<OcrLine>()
+        val out = mutableListOf<OcrLine>()
+        for (left in lines) {
+            if (left in used) continue
+            val lt = fixDigits(left.text).trim()
+            val right = if (SHORT_NUMBER.matches(lt)) lines.firstOrNull { r ->
+                r !== left && r !in used && ONE_DIGIT.matches(fixDigits(r.text).trim()) &&
+                    abs(r.cy - left.cy) < left.height * 0.35f &&
+                    r.height in left.height * 0.6f..left.height * 1.5f &&
+                    r.left - left.right in -left.height * 0.2f..left.height * 0.9f
+            } else null
+            if (right == null) {
+                out += left
+            } else {
+                used += right
+                out += OcrLine("$lt.${fixDigits(right.text).trim()}", left.left, minOf(left.top, right.top), right.right, maxOf(left.bottom, right.bottom))
+            }
+        }
+        return out.filter { it !in used }
+    }
+
     /* ───────── reading the text ───────── */
 
     internal fun tokens(lines: List<OcrLine>): List<NumToken> {
         val labelLines = lines.filter { !it.text.any(Char::isDigit) }.mapNotNull { l -> labelOf(l.text)?.let { l to it } }
         val out = mutableListOf<NumToken>()
         for (line in lines) {
-            val text = fixDigits(line.text)
+            val text = fixDigits(joinSpaced(line.text)).replace(TENTHS, "$1.$2")
             val matches = NUMBER.findAll(text).toList()
             matches.forEachIndexed { i, m ->
                 val whole = m.groupValues[2]
@@ -81,7 +117,16 @@ object LiveReader {
                 val value = (whole.replace(",", "") + if (frac.isNotEmpty()) ".$frac" else "").toDoubleOrNull() ?: return@forEachIndexed
                 val before = text.substring(if (i == 0) 0 else matches[i - 1].range.last + 1, m.range.first)
                 val after = text.substring(m.range.last + 1, if (i == matches.lastIndex) text.length else matches[i + 1].range.first)
-                val label = unitOf(after) ?: labelOf(before) ?: labelOf(after) ?: nearestLabel(line, labelLines)
+                // A unit right after the number decides, except "mi"/"km": that only says it's a distance, and a
+                // label ("TRIP A", "ODO", "RANGE") beside or above it says which one.
+                val unit = unitOf(after)
+                val label = when {
+                    before.endsWith("x") || before.endsWith("X") || before.endsWith("×") -> Label.IGNORE // tach "x1000"
+                    unit != null && unit != Label.DIST -> unit
+                    else -> labelOf(before) ?: labelOf(after)
+                        ?: nearestLabel(line, labelLines)?.takeIf { unit == null || it in DISTANCES }
+                        ?: unit
+                }
                 out += NumToken(
                     value = value,
                     decimals = frac.length,
@@ -89,24 +134,31 @@ object LiveReader {
                     dollar = m.groupValues[1].isNotEmpty() || before.trimEnd().endsWith("$"),
                     label = label,
                     line = line,
+                    leadingZero = whole.length > 1 && whole.startsWith("0"),
                 )
             }
         }
         return out
     }
 
-    /** Fixes letters the recognizer often reads instead of digits, only inside words that are mostly digits. */
-    internal fun fixDigits(text: String): String = text.split(" ").joinToString(" ") { word ->
-        val digits = word.count(Char::isDigit)
-        if (digits >= 2 && word.all { it.isDigit() || it in ".,$" || it in LOOKALIKE }) {
-            word.map { LOOKALIKE[it] ?: it }.joinToString("")
-        } else word
+    /**
+     * Fixes letters the recognizer often reads instead of digits, only in runs that are mostly digits — also
+     * when a unit is stuck on the end ("14O.4mile").
+     */
+    internal fun fixDigits(text: String): String = DIGITISH.replace(text) { m ->
+        val run = m.value
+        if (run.count(Char::isDigit) >= 2) run.map { LOOKALIKE[it] ?: it }.joinToString("") else run
+    }
+
+    /** "1 0 6 7": the separate windows of a mechanical counter, read one digit at a time. */
+    internal fun joinSpaced(text: String): String = SPACED.replace(text) { m ->
+        if (m.value.count(Char::isDigit) >= 2) m.value.replace(" ", "") else m.value
     }
 
     private fun unitOf(after: String): Label? {
         val t = after.trim().uppercase()
         return when {
-            t.startsWith("MPG") || t.startsWith("L/100") || t.startsWith("°") -> Label.IGNORE
+            t.startsWith("MPG") || t.startsWith("L/100") || t.startsWith("°") || t.startsWith("R/MIN") || t.startsWith("RPM") -> Label.IGNORE
             t.startsWith("/G") || t.startsWith("PER G") -> Label.PPG
             t.startsWith("GAL") || t == "G" -> Label.GALLONS
             t.startsWith("MI") || t.startsWith("KM") -> Label.DIST
@@ -205,12 +257,16 @@ object LiveReader {
             .filter { it.decimals == 0 && it.digits in 3..7 && it.label !in NOT_ODO && !it.dollar }
             .mapNotNull { t ->
                 val nearLast = last != null && t.value > last && t.value <= last + 1500
+                // Mechanical and older digital odometers pad with zeros ("054444"); a trip counter stacked right
+                // above or below is the other giveaway on a dash with no labels.
+                val looksOdo = t.digits >= 5 && (t.leadingZero || tripDrum(t, tokens) != null)
                 val weight = when {
                     t.label == Label.ODO && (last == null || nearLast) -> 2
                     t.label == Label.ODO -> 1
                     nearLast && t.label == Label.DIST -> 2
                     nearLast -> 1
                     last == null && t.label == Label.DIST && t.digits >= 4 -> 1
+                    last == null && looksOdo -> 1
                     else -> 0
                 }
                 if (weight > 0) Pick(LiveField.ODO, t.value, weight, t.line) else null
@@ -220,15 +276,49 @@ object LiveReader {
 
     private val NOT_TRIP = setOf(Label.IGNORE, Label.OCTANE, Label.PPG, Label.GALLONS, Label.COST, Label.ODO)
 
+    /**
+     * The values a number could stand for as Trip A:
+     *  - 312.4 as read;
+     *  - 1067 → 106.7: four digits with no point is a mechanical trip counter (its last drum is tenths, no
+     *    decimal point is printed) or a seven-segment display whose point wasn't picked up;
+     *  - 106 → 106: the tenths drum hidden behind the needle or not read at all.
+     */
+    private fun tripValues(t: NumToken): List<Pair<Double, Boolean>> = when {
+        t.decimals == 1 -> listOf(t.value to true)
+        t.decimals == 0 && t.digits == 4 -> listOf(t.value / 10 to true)
+        t.decimals == 0 && t.digits in 2..3 -> listOf(t.value to false)
+        else -> emptyList()
+    }
+
+    /** A short counter stacked above or below a long one, both drawn the same size: a trip meter by the odometer. */
+    private fun tripDrum(odo: NumToken, tokens: List<NumToken>): NumToken? = tokens.firstOrNull { t ->
+        t.line !== odo.line && t.label !in NOT_TRIP && !t.dollar &&
+            ((t.decimals == 0 && t.digits == 4) || t.decimals == 1) &&
+            t.line.height in odo.line.height * 0.5f..odo.line.height * 2f &&
+            abs(t.line.cy - odo.line.cy) in odo.line.height * 0.8f..odo.line.height * 8f &&
+            minOf(t.line.right, odo.line.right) - maxOf(t.line.left, odo.line.left) >=
+            0.5f * minOf(t.line.right - t.line.left, odo.line.right - odo.line.left)
+    }
+
     private fun trip(tokens: List<NumToken>, hint: LiveHint): Pick? {
         val expected = if (hint.odoNow != null && hint.lastOdo != null) hint.odoNow - hint.lastOdo else null
+        val drums = tokens
+            .filter { it.decimals == 0 && it.digits in 5..7 && it.label !in NOT_ODO && !it.dollar }
+            .mapNotNull { tripDrum(it, tokens) }
+            .toSet()
         return tokens
-            .filter { it.decimals == 1 && it.label !in NOT_TRIP && it.value in 0.1..1999.9 && !it.dollar }
-            .mapNotNull { t ->
+            .filter { it.label !in NOT_TRIP && !it.dollar }
+            .flatMap { t -> tripValues(t).map { (v, complete) -> Triple(t, v, complete) } }
+            .filter { (_, v, _) -> v in 0.1..1999.9 }
+            .mapNotNull { (t, v, complete) ->
+                // Gauge scale numbers (20, 40 … 140) are round; a bare round number isn't trusted as a trip.
+                val bare = !complete && t.label != Label.TRIP_A && t !in drums && v % 10.0 == 0.0
                 var w = 0
-                if (t.label == Label.TRIP_A) w += 2
-                if (expected != null && expected > 0 && abs(t.value - expected) <= 3) w += 2
-                if (w >= 2) Pick(LiveField.TRIP_A, t.value, w.coerceAtMost(2), t.line) else null
+                if (t.label == Label.TRIP_A) w += if (complete) 2 else 1
+                if (expected != null && expected > 0 && abs(v - expected) <= 3 && !bare) w += 2
+                if (t in drums && complete) w += 1
+                if (t.label == Label.DIST && t.decimals == 1) w += 1
+                if (w >= 1) Pick(LiveField.TRIP_A, v, w.coerceAtMost(2), t.line) else null
             }
             .maxByOrNull { it.weight }
     }
