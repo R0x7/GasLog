@@ -124,6 +124,8 @@ private fun Scanner(vm: GasViewModel) {
     // Latest frame grabbed when pump / dash numbers locked in; handed on as photos so Gemini can fill gaps.
     val snaps = remember { mutableStateMapOf<Boolean, Bitmap>() }
     var picks by remember { mutableStateOf<List<Pick>>(emptyList()) }
+    var seen by remember { mutableStateOf<List<OcrLine>>(emptyList()) }
+    var showSeen by remember { mutableStateOf(false) }
     var torch by remember { mutableStateOf(false) }
 
     val preview = remember {
@@ -166,6 +168,7 @@ private fun Scanner(vm: GasViewModel) {
                     OcrLine(l.text, b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), b.bottom.toFloat())
                 }
                 val frame = LiveReader.analyze(lines, vm.liveHint(votes.locked[LiveField.ODO]))
+                seen = lines
                 picks = frame
                 val newly = votes.add(frame)
                 if (newly.isNotEmpty()) {
@@ -193,6 +196,7 @@ private fun Scanner(vm: GasViewModel) {
 
     Box(Modifier.fillMaxSize()) {
         AndroidView(factory = { preview }, modifier = Modifier.fillMaxSize())
+        if (showSeen) SeenOverlay(seen)
         BoxOverlay(picks, locked)
 
         Row(
@@ -201,6 +205,9 @@ private fun Scanner(vm: GasViewModel) {
         ) {
             RoundButton("✕") { vm.closeLiveScan() }
             Spacer(Modifier.weight(1f))
+            // Shows all the text the camera picks up, to see why a number isn't being found.
+            RoundButton(if (showSeen) "Aa On" else "Aa") { showSeen = !showSeen }
+            Spacer(Modifier.padding(4.dp))
             RoundButton(if (torch) "🔦 On" else "🔦") {
                 torch = !torch
                 controller.enableTorch(torch)
@@ -291,6 +298,28 @@ private fun BoxOverlay(picks: List<Pick>, locked: Map<LiveField, Double>) {
             )
             paint.color = color.toArgb()
             drawContext.canvas.nativeCanvas.drawText(p.field.title, l.left - 6f, l.top - 14f, paint)
+        }
+    }
+}
+
+/** Every line of text the recognizer read in this frame, written over it in grey. */
+@Composable
+private fun SeenOverlay(lines: List<OcrLine>) {
+    val paint = remember { Paint().apply { isAntiAlias = true; textSize = 30f; color = android.graphics.Color.WHITE } }
+    val bg = remember { Paint().apply { color = 0xB3000000.toInt() } }
+    Canvas(Modifier.fillMaxSize()) {
+        for (l in lines) {
+            drawRoundRect(
+                color = Color(0x99ADB5BD),
+                topLeft = Offset(l.left, l.top),
+                size = androidx.compose.ui.geometry.Size(l.right - l.left, l.bottom - l.top),
+                cornerRadius = CornerRadius(6f, 6f),
+                style = Stroke(width = 2f),
+            )
+            val c = drawContext.canvas.nativeCanvas
+            val w = paint.measureText(l.text)
+            c.drawRect(l.left, l.bottom + 2f, l.left + w + 8f, l.bottom + 36f, bg)
+            c.drawText(l.text, l.left + 4f, l.bottom + 28f, paint)
         }
     }
 }

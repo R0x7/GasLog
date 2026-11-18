@@ -12,10 +12,18 @@ object GeminiClient {
     private val MODELS = listOf("gemini-flash-latest", "gemini-flash-lite-latest")
     private val TRY_NEXT_ON = setOf(403, 404, 429, 500, 503)
 
-    /** photos: base64 JPEGs in any order (pump, dash, ...). Blocking; call off the main thread. */
-    fun read(apiKey: String, photos: List<String>): Reading {
+    /**
+     * photos: base64 JPEGs in any order (pump, dash, ...). [lastOdo]: the odometer at the previous fill-up,
+     * which helps tell which counter is Trip A. Blocking; call off the main thread.
+     */
+    fun read(apiKey: String, photos: List<String>, lastOdo: Double? = null): Reading {
         if (photos.isEmpty()) throw IOException("Add at least one photo.")
-        val parts = JSONArray().put(JSONObject().put("text", PROMPT))
+        val context = if (lastOdo != null) {
+            "\n\nFor checking only: the odometer read ${lastOdo.toLong()} at the previous fill-up and Trip A is " +
+                "normally reset then, so Trip A should be close to (odometer now − ${lastOdo.toLong()}). Use this " +
+                "to tell the counters apart and to place a missing decimal point — still report what's displayed."
+        } else ""
+        val parts = JSONArray().put(JSONObject().put("text", PROMPT + context))
         photos.forEachIndexed { i, data ->
             parts.put(JSONObject().put("text", "Photo ${i + 1} of ${photos.size}:"))
             parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", data)))
@@ -103,8 +111,19 @@ object GeminiClient {
           show the station brand and the selected grade / octane (87, 89, 91 ...).
         - A car instrument cluster: the odometer (total miles, often "ODO") and Trip A
           (labeled "TRIP A" or "A", usually with one decimal).
+          Digital dashes often show "TRIP" with a small boxed "A" next to a number with a unit such as
+          "140.4 mile" — that number is Trip A.
+          Older cars have mechanical rolling-drum counters and often no labels at all: the long counter
+          is the odometer (it may show a leading zero: "054444" is 54444), and the short counter (usually
+          4 drums) next to it is Trip A. A drum trip meter has no decimal point: its last drum, often a
+          different color (white or red), is tenths — drums reading 1 0 6 7 mean 106.7. Trip A is
+          then never more than 999.9. If the needle hides the tenths drum, report the whole miles
+          (e.g. 106) and say so in "notes".
         The photos come in any order. Work out for yourself which shows the pump and which the dashboard;
         one photo may show both, and several photos may show the same thing. Use everything visible.
+
+        Ignore the printed scale numbers around a gauge (20, 40, 60 … on the speedometer, 1–8 on the
+        tachometer, "x1000"): they are not readings.
 
         Pump displays often use seven-segment digits: check each digit carefully (8 vs 6 vs 9 vs 0,
         1 vs 7, 5 vs 6). Do not confuse the price per gallon with the total sale. Do not report

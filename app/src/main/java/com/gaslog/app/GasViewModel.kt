@@ -268,7 +268,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
             reading = true
             readStatus = "Reading the numbers…"
             try {
-                val r = withContext(Dispatchers.IO) { GeminiClient.read(key, list) }
+                val r = withContext(Dispatchers.IO) { GeminiClient.read(key, list, previousOdo()) }
                 applyReading(r, onlyEmpty)
                 readStatus = if (r.notes.isNotBlank()) "⚠️ ${r.notes}" else "Done — check the numbers below."
             } catch (e: Exception) {
@@ -289,7 +289,7 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         put(gallons, r.gallons, 3)
         put(cost, r.cost, 2)
         put(odo, r.odo, 0)
-        put(tripA, r.tripA, 1)
+        put(tripA, tripFix(r.tripA, r.odo ?: GasSheet.num(odo.text)), 1)
         put(octane, r.octane, 0)
         // A remembered station near here beats the brand on the pump ("Valero Big Bear" vs "Valero").
         if (r.station.isNotBlank() && place.src != Src.NEARBY && (!onlyEmpty || place.text.isBlank())) {
@@ -298,6 +298,17 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
             place.src = Src.PHOTO
         }
         fillGaps()
+    }
+
+    /**
+     * A trip meter with no printed decimal point (rolling drums, or a seven-segment point that wasn't seen)
+     * can come back ten times too big: 1067 for 106.7. If the odometer change says so, put the point back.
+     */
+    private fun tripFix(trip: Double?, odoNow: Double?): Double? {
+        val last = previousOdo()
+        if (trip == null || odoNow == null || last == null || odoNow <= last || trip != Math.rint(trip)) return trip
+        val driven = odoNow - last
+        return if (abs(trip - driven) > 3 && abs(trip / 10 - driven) <= 3) trip / 10 else trip
     }
 
     /** Fill gaps from what we know; these are marked "calc" so you can tell. */
