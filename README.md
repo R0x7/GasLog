@@ -23,7 +23,7 @@ and **their own** free Gemini key.
 - **Stats** — usual mpg, cost per mile, monthly spending, an mpg-per-tank chart and a station price ranking.
 - **MPG drop alert** — warns when a tank comes in 15%+ below your usual mpg.
 - **Maintenance reminders** — reads the OIL CHANGES / Tire Rotation columns, shows when each is due
-  (intervals in Settings) and logs new ones.
+  (intervals in Settings) and logs new ones on the row of the fill-up with the closest odometer reading.
 - **Remembers stations** — with location allowed, the place is filled in when you're back at a station
   you've used (kept on the phone only).
 - **Works offline** — fill-ups saved without signal are queued and sent when you're back online.

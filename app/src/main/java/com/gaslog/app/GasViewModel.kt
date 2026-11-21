@@ -699,11 +699,12 @@ class GasViewModel(app: Application) : AndroidViewModel(app) {
         }
         val stamp = LocalDate.now().let { "${it.monthValue}/${it.dayOfMonth}/${it.year % 100}" }
         launchLoading {
+            var row = 0
             config = sheets { sc ->
-                GasSheet.logService(sc, id, c, s, mileage, stamp)
+                row = GasSheet.logService(sc, id, c, s, mileage, stamp)
                 GasSheet.load(sc, id)
             }
-            message = "${s.title} logged on ${c.name} at ${fmtInt(mileage)} mi."
+            message = "${s.title} logged on ${c.name} at ${fmtInt(mileage)} mi (row $row)."
         }
     }
 

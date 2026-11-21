@@ -244,10 +244,11 @@ object GasSheet {
     }
 
     /**
-     * Logs an oil change / tire rotation: a note ("oil change 11/5/26") plus the odometer, on the next free
-     * row of that service's columns. Adds the columns to the right of the existing headers if missing.
+     * Logs an oil change / tire rotation: a note ("oil change 11/5/26") plus the odometer, on the row of the
+     * fill-up whose odometer is closest to [odo] (see [serviceRow]). Adds the columns to the right of the
+     * existing headers if missing. Returns the row written.
      */
-    fun logService(sc: SheetsClient, id: String, car: Car, service: Service, odo: Double, dateText: String) {
+    fun logService(sc: SheetsClient, id: String, car: Car, service: Service, odo: Double, dateText: String): Int {
         val tab = findTab(sc, id, car)
         val q = quote(tab.title)
         val header = sc.batchGet(id, listOf("$q!A1:${HEADER_SCAN}1")).first().firstOrNull().orEmpty()
@@ -267,14 +268,34 @@ object GasSheet {
         }
 
         val (c, mc) = cols
-        val used = sc.batchGet(id, listOf("$q!${col(c)}2:${col(mc ?: c)}")).first()
-        val lastUsed = used.indexOfLast { r -> r.any { text(it).isNotEmpty() } }.let { if (it < 0) 0 else it + 2 }
-        val row = maxOf(6, lastUsed + 1)
+        val got = sc.batchGet(id, listOf("$q!${col(c)}2:${col(mc ?: c)}", "$q!A1:I"))
+        val used = got.getOrElse(0) { emptyList() }
+        val fills = scan(got.getOrElse(1) { emptyList() }).fills
+        val occupied = used.indices.filter { i -> used[i].any { text(it).isNotEmpty() } }.map { it + 2 }.toSet()
+        val row = serviceRow(fills, odo, occupied)
+
+        if (row > tab.rowCount) {
+            sc.batchUpdate(id, JSONArray().put(JSONObject().put("appendDimension",
+                JSONObject().put("sheetId", tab.id).put("dimension", "ROWS").put("length", row - tab.rowCount + 50))))
+        }
         if (mc != null) {
             sc.update(id, "$q!${col(c)}$row:${col(mc)}$row", listOf(listOf("${service.noteWord} $dateText", odo)))
         } else {
             sc.update(id, "$q!${col(c)}$row", listOf(listOf(odo)))
         }
+        return row
+    }
+
+    /**
+     * Row for a service done at [odo]: the fill-up row whose odometer is closest to it (the earlier row on a
+     * tie). If that row already has something in the service's columns ([occupied] rows), the next closest
+     * free fill-up row is used. With no usable fill-up, the row after the last used one (row 6 at the earliest).
+     */
+    fun serviceRow(fills: List<Fill>, odo: Double, occupied: Set<Int>): Int {
+        val pick = fills
+            .filter { it.odo != null && it.odo > 0 && it.row !in occupied }
+            .minWithOrNull(compareBy<Fill>({ abs(it.odo!! - odo) }, { it.row }))
+        return pick?.row ?: maxOf(6, (occupied.maxOrNull() ?: 0) + 1)
     }
 
     /**
